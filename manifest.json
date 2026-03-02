@@ -1,0 +1,26 @@
+{
+  "name": "DataEdge — Installment Data Plans",
+  "short_name": "DataEdge",
+  "description": "Nigeria's smartest installment data platform by Vortexedge Limited",
+  "start_url": "/mobile.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#060d2b",
+  "background_color": "#060d2b",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"],
+  "lang": "en-NG"
+}
