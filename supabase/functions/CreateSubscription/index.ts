@@ -51,6 +51,19 @@ serve(async (req) => {
       );
     }
 
+    // Idempotency check: reject if an active/paying/pending subscription for this plan already exists
+    const existingRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${user_id}&plan_id=eq.${plan_id}&status=in.(pending,paying,active)&limit=1`,
+      { headers }
+    );
+    const existing = await existingRes.json();
+    if (existing.length > 0) {
+      return new Response(
+        JSON.stringify({ error: "Subscription already active for this plan", subscription: existing[0] }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     // Fetch plan
     const planRes = await fetch(
       `${SUPABASE_URL}/rest/v1/data_plans?id=eq.${plan_id}&select=*`,

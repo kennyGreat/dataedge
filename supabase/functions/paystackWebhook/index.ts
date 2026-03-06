@@ -97,17 +97,25 @@ serve(async (req) => {
     }
 
     // ── Credit wallet ──
+    // Fetch the authoritative balance from the wallets table (not the stale mirror in users)
+    const walletRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${user.id}&select=balance`,
+      { headers }
+    );
+    const walletRows = await walletRes.json();
+    const currentBalance = walletRows[0]?.balance ?? 0;
+
     await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${user.id}`, {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ balance: (user.wallet_balance || 0) + amount }),
+      body: JSON.stringify({ balance: Number(currentBalance) + amount }),
     });
 
-    // Sync users.wallet_balance
+    // Sync users.wallet_balance mirror (handled by DB trigger, but kept for safety)
     await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${user.id}`, {
       method: "PATCH",
       headers,
-      body: JSON.stringify({ wallet_balance: (user.wallet_balance || 0) + amount }),
+      body: JSON.stringify({ wallet_balance: Number(currentBalance) + amount }),
     });
 
     // Wallet transaction record
