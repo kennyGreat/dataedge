@@ -735,7 +735,7 @@ nav{
       <h2>Create account ✨</h2>
       <p class="sub">Join DataEdge — completely free</p>
       <div id="su-err" class="auth-err hide"></div>
-      <div id="su-ok" class="auth-ok hide">✅ Account created! Check your email to confirm, then sign in.</div>
+      <div id="su-ok" class="auth-ok hide">✅ Account created! Check your email to confirm your address, then sign in.</div>
 
       <!-- Google Sign Up -->
       <button class="btn-google" onclick="doGoogleLogin()">
@@ -1165,13 +1165,15 @@ async function doSignup(){
   setBtnLoad('su-btn',false,'Create Account');
   if(error){setAuthErr('su',error.message);return;}
   if(data.session){
+    // Email confirmations disabled — user is auto-logged in immediately
     me=data.user;
     await sb.from('users').update({is_student:stuChecked}).eq('id',me.id);
     document.getElementById('auth-screen').style.display='none';
-    toast('Welcome to DataEdge, '+name+'! 🎉','success');
+    toast('Account created! Welcome to DataEdge, '+name+'! 🎉','success');
     await bootApp();
     if(phone) callCreateVA(name,phone);
   } else {
+    // Email confirmations enabled — user must verify before signing in
     document.getElementById('su-ok').classList.remove('hide');
     const b=document.getElementById('su-btn');
     b.textContent='Account Created ✅'; b.disabled=true;
