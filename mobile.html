@@ -848,18 +848,13 @@ async function doSignup(){
     options:{data:{full_name:name,phone,is_student:stuChecked}}});
   setBtnLoad('su-btn',false,'Create Account');
   if(error){authErr('su-err',error.message);return;}
-  if(data.session){
-    me=data.user;
-    await sb.from('users').update({is_student:stuChecked}).eq('id',me.id);
-    document.getElementById('auth-page').style.display='none';
-    await bootApp();
-    toast('Welcome to DataEdge! 🎉','success');
-    if(phone) callCreateVA(name,phone);
-  } else {
-    document.getElementById('su-ok').style.display='';
-    const b=document.getElementById('su-btn');b.textContent='Done ✅';b.disabled=true;
-    setTimeout(()=>authTab(true),3000);
-  }
+  if(!data.user){authErr('su-err','Signup failed. Please try again.');return;}
+  me=data.user;
+  await sb.from('users').update({is_student:stuChecked}).eq('id',me.id);
+  document.getElementById('auth-page').style.display='none';
+  toast('Welcome to DataEdge, '+name+'! 🎉','success');
+  await bootApp();
+  if(phone) callCreateVA(name,phone);
 }
 async function doLogout(){
   await sb.auth.signOut();
