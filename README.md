@@ -95,3 +95,38 @@ supabase db push
 ## 🏢 Company
 
 **Vortexedge Limited** — All rights reserved © 2026
+
+---
+
+## ✅ Production Checklist
+
+### Email Confirmation
+
+By default (`enable_confirmations = false` in `supabase/config.toml`), users are auto-logged in immediately after signup — no email is sent and `data.session` is returned from `signUp()`.
+
+For production deployments, enable email confirmation to require users to verify their address:
+
+1. **Update `supabase/config.toml`:**
+   ```toml
+   [auth.email]
+   enable_confirmations = true
+   ```
+
+2. **Configure SMTP in your Supabase project dashboard:**
+   - Go to **Authentication → Settings → SMTP Settings**
+   - Fill in your SMTP provider details (e.g. SendGrid, Resend, Mailgun):
+     | Field | Example |
+     |---|---|
+     | Host | `smtp.sendgrid.net` |
+     | Port | `465` (SSL) or `587` (TLS) |
+     | Username | `apikey` |
+     | Password | your SMTP API key |
+     | Sender email | `noreply@yourdomain.com` |
+     | Sender name | `DataEdge` |
+
+3. **Customise the confirmation email template** (optional):
+   - Go to **Authentication → Email Templates → Confirm signup**
+
+4. **Frontend behaviour** — the `doSignup()` function in both `index.html` and `mobile.html` already handles both flows:
+   - `data.session` returned → user is auto-logged in (confirmations **off**)
+   - `data.session` is `null` → show "Check your email" message (confirmations **on**)

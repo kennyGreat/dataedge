@@ -40,6 +40,10 @@ minimum_password_length = 6
 [auth.email]
 enable_signup = true
 double_confirm_changes = true
+# enable_confirmations controls whether users must verify their email before signing in.
+# false (development default): Users are auto-logged in after signup — data.session is returned.
+# true  (production):          Users must click a confirmation link — data.session is null until verified.
+# To enable in production: set to true AND configure SMTP settings in your Supabase project dashboard.
 enable_confirmations = false  # set to true in production
 
 [edge_runtime]
