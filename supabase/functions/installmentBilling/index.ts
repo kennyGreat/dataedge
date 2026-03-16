@@ -1,17 +1,20 @@
 // installmentBilling Edge Function — DataEdge / Vortexedge Limited
 //
-// Flow:
-//   1. Find all pending subscriptions for the user
-//   2. Check wallet balance
-//   3. Apply student 20% discount for first 7 days if within first 7 days
-//   4. Deduct wallet, update ledger
-//   5. If fully paid → activate subscription + queue VTU job
-//   6. Else → update amount_paid
+// Modes:
+//   Single-user  — POST { user_id }
+//     • Called by CreateSubscription and paystackWebhook for immediate first deduction.
+//     • Processes all pending/paying subscriptions for one user.
 //
-// Called by:
-//   - CreateSubscription (first payment trigger)
-//   - paystackWebhook (on charge.success)
-//   - Cron job / scheduled trigger (daily deductions)
+//   Bulk / cron  — POST {} (no user_id)
+//     • Called by the pg_cron schedule (daily at 08:00 UTC) or manually.
+//     • Processes every pending/paying subscription across all users.
+//
+// Flow per subscription:
+//   1. Resolve daily amount (student discount applied if within 7-day window)
+//   2. Skip if wallet balance is insufficient (subscription stays pending)
+//   3. Debit wallet, record wallet_transaction + ledger_transaction + audit_log
+//   4. If fully paid → mark completed + queue VTU job
+//   5. Else → update amount_paid + advance next_billing_at by 1 day
 //
 // Required env vars:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -28,137 +31,204 @@ const headers = {
   Prefer: "return=representation",
 };
 
-serve(async (req) => {
-  try {
-    const { user_id } = await req.json();
+// Process a single subscription row. Returns a result descriptor.
+async function processSubscription(
+  subscription: Record<string, unknown>
+): Promise<{ id: string; result: string; amount?: number }> {
+  const userId = subscription.user_id as string;
+  const daily  =
+    Number(subscription.daily_amount) ||
+    Number(subscription.daily_installment) ||
+    0;
 
-    // Fetch pending subscriptions for user
-    const subsRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${user_id}&status=eq.pending`,
-      { headers }
+  if (daily <= 0) {
+    return { id: subscription.id as string, result: "skipped_no_daily" };
+  }
+
+  // Fetch authoritative wallet balance
+  const walletRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${userId}&select=balance`,
+    { headers }
+  );
+  const walletRows = await walletRes.json();
+  const wallet = walletRows[0];
+  if (!wallet) return { id: subscription.id as string, result: "no_wallet" };
+
+  // Student 7-day discount: 20% off (pay 80%)
+  const now       = new Date();
+  const discountUntil = subscription.student_discount_until
+    ? new Date(subscription.student_discount_until as string)
+    : null;
+  const isStudentDiscountActive =
+    subscription.is_student === true &&
+    discountUntil !== null &&
+    now <= discountUntil;
+
+  const amountToDeduct = isStudentDiscountActive ? daily * 0.8 : daily;
+
+  if (Number(wallet.balance) < amountToDeduct) {
+    // Advance next_billing_at so cron retries tomorrow
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/subscriptions?id=eq.${subscription.id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ next_billing_at: new Date(now.getTime() + 86400000).toISOString() }),
+      }
     );
-    const subs = await subsRes.json();
-    if (!subs.length) return new Response("No pending subscriptions", { status: 200 });
+    return { id: subscription.id as string, result: "insufficient_balance" };
+  }
 
-    const subscription = subs[0];
+  const newBalance = Number(wallet.balance) - amountToDeduct;
 
-    // Fetch wallet
-    const walletRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${user_id}`,
-      { headers }
-    );
-    const wallet = (await walletRes.json())[0];
-    if (!wallet) return new Response("Wallet not found", { status: 404 });
+  // Debit wallet
+  await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${userId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ balance: newBalance }),
+  });
 
-    const daily = subscription.daily_amount || subscription.daily_installment;
+  // Sync users.wallet_balance mirror (also kept in sync by DB trigger)
+  await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${userId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ wallet_balance: newBalance }),
+  });
 
-    // Student 7-day discount check
-    const now   = new Date();
-    const start = new Date(subscription.created_at);
-    const diffDays = (now.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
-    const isStudentDiscountActive =
-      subscription.is_student && diffDays <= 7;
+  // Wallet transaction record
+  await fetch(`${SUPABASE_URL}/rest/v1/wallet_transactions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      user_id: userId,
+      amount: amountToDeduct,
+      type: "debit",
+      reference: subscription.id,
+      metadata: {
+        description:      "Installment payment",
+        subscription_id:  subscription.id,
+        student_discount: isStudentDiscountActive,
+      },
+    }),
+  });
 
-    const amountToDeduct = isStudentDiscountActive ? daily * 0.8 : daily; // 20% off = pay 80%
+  // Ledger debit entry
+  await fetch(`${SUPABASE_URL}/rest/v1/ledger_transactions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      user_id:   userId,
+      type:      "debit",
+      amount:    amountToDeduct,
+      reference: subscription.id,
+    }),
+  });
 
-    if (wallet.balance < amountToDeduct) {
-      return new Response("Insufficient balance", { status: 200 });
-    }
+  // Audit log
+  await fetch(`${SUPABASE_URL}/rest/v1/installment_audit_logs`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      subscription_id: subscription.id,
+      user_id:         userId,
+      amount:          amountToDeduct,
+      action:          "daily_deduction",
+    }),
+  });
 
-    // Debit wallet
-    await fetch(`${SUPABASE_URL}/rest/v1/wallets?user_id=eq.${user_id}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ balance: wallet.balance - amountToDeduct }),
-    });
+  const newPaid = Number(subscription.amount_paid) + amountToDeduct;
+  const total   = Number(subscription.total_price);
 
-    // Sync users.wallet_balance
-    await fetch(`${SUPABASE_URL}/rest/v1/users?id=eq.${user_id}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ wallet_balance: wallet.balance - amountToDeduct }),
-    });
-
-    // Ledger debit entry
-    await fetch(`${SUPABASE_URL}/rest/v1/ledger_transactions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        user_id,
-        type: "debit",
-        amount: amountToDeduct,
-        reference: subscription.id,
-      }),
-    });
-
-    // Wallet transaction record
-    await fetch(`${SUPABASE_URL}/rest/v1/wallet_transactions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        user_id,
-        amount: amountToDeduct,
-        type: "debit",
-        reference: subscription.id,
-        metadata: {
-          description: "Installment payment",
-          subscription_id: subscription.id,
-          student_discount: isStudentDiscountActive,
-        },
-      }),
-    });
-
-    const newPaid = subscription.amount_paid + amountToDeduct;
-    const total   = subscription.total_price;
-
-    if (newPaid >= total) {
-      // Fully paid → activate
-      await fetch(
-        `${SUPABASE_URL}/rest/v1/subscriptions?id=eq.${subscription.id}`,
-        {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify({
-            status: "completed",
-            amount_paid: total,
-            completed_at: new Date().toISOString(),
-          }),
-        }
-      );
-
-      // Queue VTU delivery job
-      await fetch(`${SUPABASE_URL}/rest/v1/vtu_jobs`, {
-        method: "POST",
+  if (newPaid >= total) {
+    // Fully paid → complete + queue VTU job
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/subscriptions?id=eq.${subscription.id}`,
+      {
+        method: "PATCH",
         headers,
         body: JSON.stringify({
-          subscription_id: subscription.id,
-          provider_priority: 1,
-          status: "queued",
+          status:       "completed",
+          amount_paid:  total,
+          completed_at: now.toISOString(),
+          updated_at:   now.toISOString(),
         }),
-      });
+      }
+    );
+
+    await fetch(`${SUPABASE_URL}/rest/v1/vtu_jobs`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        subscription_id:   subscription.id,
+        provider_priority: 1,
+        status:            "queued",
+      }),
+    });
+
+    return { id: subscription.id as string, result: "completed", amount: amountToDeduct };
+  } else {
+    // Partial payment — advance billing date
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/subscriptions?id=eq.${subscription.id}`,
+      {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({
+          amount_paid:     newPaid,
+          status:          "paying",
+          next_billing_at: new Date(now.getTime() + 86400000).toISOString(),
+          updated_at:      now.toISOString(),
+        }),
+      }
+    );
+
+    return { id: subscription.id as string, result: "partial", amount: amountToDeduct };
+  }
+}
+
+serve(async (req) => {
+  try {
+    const body = await req.json().catch(() => ({}));
+    const userId: string | undefined = body?.user_id;
+
+    let subs: Record<string, unknown>[];
+
+    if (userId) {
+      // Single-user mode: process all pending/paying subscriptions for this user
+      const subsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${userId}&status=in.(pending,paying)`,
+        { headers }
+      );
+      subs = await subsRes.json();
     } else {
-      // Partial payment → update amount_paid and activate paying status
-      await fetch(
-        `${SUPABASE_URL}/rest/v1/subscriptions?id=eq.${subscription.id}`,
-        {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify({
-            amount_paid: newPaid,
-            status: "paying",
-            updated_at: new Date().toISOString(),
-          }),
-        }
+      // Bulk / cron mode: process all overdue subscriptions across all users.
+      // Limited to 500 per invocation to stay within the Edge Function 60-second timeout.
+      // The pg_cron schedule calls this every day; any unprocessed subscriptions will be
+      // picked up on the next run because next_billing_at is advanced per cycle.
+      const now = new Date().toISOString();
+      const subsRes = await fetch(
+        `${SUPABASE_URL}/rest/v1/subscriptions?status=in.(pending,paying)&or=(next_billing_at.is.null,next_billing_at.lte.${encodeURIComponent(now)})&limit=500`,
+        { headers }
+      );
+      subs = await subsRes.json();
+    }
+
+    if (!subs.length) {
+      return new Response(
+        JSON.stringify({ success: true, processed: 0, message: "No subscriptions due" }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
       );
     }
 
+    const results = await Promise.all(subs.map(processSubscription));
+
     return new Response(
-      JSON.stringify({ success: true, amount_deducted: amountToDeduct }),
+      JSON.stringify({ success: true, processed: results.length, results }),
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: err.message }),
+      JSON.stringify({ error: (err as Error).message }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }

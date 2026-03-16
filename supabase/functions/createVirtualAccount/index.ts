@@ -1,9 +1,10 @@
 // createVirtualAccount Edge Function — DataEdge / Vortexedge Limited
 //
 // Flow:
-//   1. Create Paystack customer (email + name + phone)
-//   2. Create dedicated virtual account (Wema Bank)
-//   3. Save account_number + bank_name to users table
+//   1. Validate caller JWT → extract authenticated user_id (no body-spoofing)
+//   2. Create Paystack customer (email + name + phone)
+//   3. Create dedicated virtual account (Wema Bank)
+//   4. Save account_number + bank_name to users table
 //
 // Required env vars:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PAYSTACK_SECRET_KEY
@@ -14,16 +15,42 @@ const PAYSTACK_SECRET = Deno.env.get("PAYSTACK_SECRET_KEY")!;
 const SUPABASE_URL    = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY     = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// ── JWT validation ──────────────────────────────────────────────────────────
+async function getAuthenticatedUser(req: Request): Promise<{ id: string; email: string }> {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (!token) throw new Error("Missing Authorization header");
+
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    headers: {
+      apikey: SERVICE_KEY,
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) throw new Error("Invalid or expired token");
+  return res.json();
+}
+
 serve(async (req) => {
   try {
-    const { user_id, email, first_name, last_name, phone } = await req.json();
-
-    if (!user_id || !email) {
+    // ── Authenticate caller ──
+    let authUser: { id: string; email: string };
+    try {
+      authUser = await getAuthenticatedUser(req);
+    } catch (e) {
       return new Response(
-        JSON.stringify({ error: "user_id and email are required" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ error: (e as Error).message }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
       );
     }
+
+    // user_id is always taken from the validated JWT — never from the request body
+    const user_id = authUser.id;
+
+    const { first_name, last_name, phone } = await req.json();
+    // email comes from the validated token, not the body
+    const email = authUser.email;
 
     // Step 1: Create Paystack customer
     const customerRes = await fetch("https://api.paystack.co/customer", {
@@ -100,7 +127,7 @@ serve(async (req) => {
     );
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: err.message }),
+      JSON.stringify({ error: (err as Error).message }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
