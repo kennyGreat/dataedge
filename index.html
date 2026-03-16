@@ -735,8 +735,6 @@ nav{
       <h2>Create account ✨</h2>
       <p class="sub">Join DataEdge — completely free</p>
       <div id="su-err" class="auth-err hide"></div>
-      <div id="su-ok" class="auth-ok hide">✅ Account created! Check your email to confirm, then sign in.</div>
-
       <!-- Google Sign Up -->
       <button class="btn-google" onclick="doGoogleLogin()">
         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -1174,11 +1172,6 @@ async function doSignup(){
     toast('Welcome to DataEdge, '+name+'! 🎉','success');
     await bootApp();
     if(phone) callCreateVA(name,phone);
-  } else {
-    document.getElementById('su-ok').classList.remove('hide');
-    const b=document.getElementById('su-btn');
-    b.textContent='Account Created ✅'; b.disabled=true;
-    setTimeout(()=>flip(true),3200);
   }
 }
 
