@@ -830,6 +830,7 @@ async function doLogin(){
   const {data,error}=await sb.auth.signInWithPassword({email,password:pass});
   setBtnLoad('li-btn',false,'Sign In');
   if(error){authErr('li-err',error.message);return;}
+  if(!data.user){authErr('li-err','Login failed. Please try again.');return;}
   if(rememberMe) localStorage.setItem('de_remember_email',email);
   else localStorage.removeItem('de_remember_email');
   me=data.user;

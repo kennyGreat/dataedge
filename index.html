@@ -1145,6 +1145,7 @@ async function doLogin(){
   const {data,error}=await sb.auth.signInWithPassword({email,password:pass});
   setBtnLoad('li-btn',false,'Sign In');
   if(error){setAuthErr('login',error.message);return;}
+  if(!data.user){setAuthErr('login','Login failed. Please try again.');return;}
   // Save email if Remember Me checked
   if(rememberMe) localStorage.setItem('de_remember_email', email);
   else localStorage.removeItem('de_remember_email');
